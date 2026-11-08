@@ -1,0 +1,26 @@
+# Speech-to-Text Desktop Application (Telegram-Style)
+# Requirements for Persian (Farsi) & English Whisper Transcription
+
+# OpenAI Whisper Speech-to-Text Engine
+openai-whisper>=20231117
+
+# PyTorch (For CUDA GPU acceleration, see README for CUDA-specific pip command)
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# Live Audio Recording
+sounddevice>=0.4.6
+
+# Audio Processing & Scientific Computing
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Modern GUI Framework (Optional for enhanced widgets, Tkinter built-in is also supported)
+customtkinter>=5.2.0
+
+# Modern Pillow for image handling
+Pillow>=10.0.0
+
+# FFmpeg helper for automatic audio decoding on Windows
+imageio-ffmpeg>=0.4.9
+
