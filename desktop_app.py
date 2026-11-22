@@ -20,6 +20,7 @@ import time
 import ctypes
 import datetime
 import threading
+import subprocess
 from pathlib import Path
 from typing import Tuple, List, Optional, Dict, Any
 
@@ -46,8 +47,10 @@ else:
 ASSETS_DIR = APP_DIR / "assets"
 MODELS_DIR = APP_DIR / "models"
 OUTPUT_DIR = APP_DIR / "transcriptions"
+EXTRACTIONS_DIR = APP_DIR / "extracted_audio"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
+EXTRACTIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ------------------------------------------------------------------------------
 # تم گرافیکی تیره مدرن و صنعتی (Professional Dark Palette)
@@ -182,6 +185,57 @@ def load_audio_safely(filepath: str) -> Tuple[np.ndarray, float]:
 
     duration = len(data) / 16000.0
     return data, duration
+
+
+def extract_audio_from_video(video_path: str, output_format: str = "mp3") -> Tuple[str, float]:
+    """
+    استخراج مستقیم و فوق‌سریع صدای ویدیو با استفاده از موتور FFmpeg (بدون افت کیفیت)
+    """
+    setup_ffmpeg_environment()
+    ffmpeg_exe = shutil.which("ffmpeg")
+    if not ffmpeg_exe:
+        app_ffmpeg = APP_DIR / "ffmpeg.exe"
+        if app_ffmpeg.exists():
+            ffmpeg_exe = str(app_ffmpeg)
+        else:
+            raise RuntimeError(
+                "ابزار FFmpeg جهت استخراج صوت از ویدیو یافت نشد.\n\n"
+                "لطفاً مطمئن شوید FFmpeg در سیستم نصب است یا فایل ffmpeg.exe در پوشه برنامه قرار دارد."
+            )
+
+    clean_name = Path(video_path).stem
+    clean_name = clean_name.replace('Ø', 'O').replace('ø', 'o').replace('æ', 'ae').replace('ß', 'ss')
+    clean_name = re.sub(r'[\\/*?:"<>| \x00-\x1f]', '_', clean_name)[:35]
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_file = EXTRACTIONS_DIR / f"{clean_name}_{timestamp}.{output_format.lower()}"
+
+    cmd = [ffmpeg_exe, "-y", "-i", str(video_path), "-vn"]
+    if output_format.lower() == "mp3":
+        cmd += ["-acodec", "libmp3lame", "-b:a", "192k"]
+    elif output_format.lower() == "wav":
+        cmd += ["-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1"]
+    else:
+        cmd += ["-acodec", "copy"]
+    cmd.append(str(out_file))
+
+    start_t = time.time()
+    startupinfo = None
+    if sys.platform == "win32":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+    res = subprocess.run(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        startupinfo=startupinfo
+    )
+    if res.returncode != 0:
+        err_msg = res.stderr.decode("utf-8", errors="replace")[-300:]
+        raise RuntimeError(f"خطا در استخراج صوت توسط FFmpeg:\n{err_msg}")
+
+    elapsed = time.time() - start_t
+    return str(out_file), elapsed
 
 
 def format_timestamp(seconds: float) -> str:
@@ -358,6 +412,12 @@ class WhisperFlowStudio(tk.Tk):
         self.last_saved_filepath: Optional[str] = None
         self.last_results: Optional[Dict[str, Any]] = None
 
+        # وضعیت‌های تب‌بندی و استخراج ویدیو
+        self.current_main_tab = "transcribe"
+        self.selected_video_path: Optional[str] = None
+        self.is_extracting_audio = False
+        self.last_extracted_audio_path: Optional[str] = None
+
         # ساخت لایه‌های گرافیکی
         self._build_interface()
 
@@ -479,8 +539,52 @@ class WhisperFlowStudio(tk.Tk):
         self.model_combo.pack(side="left")
         self.model_combo.bind("<<ComboboxSelected>>", self._on_change_model)
 
+        # ----------------- نوار تب‌های اصلی برنامه (Main Navigation Tabs) -----------------
+        nav_container = tk.Frame(self, bg=BG_MAIN)
+        nav_container.pack(fill="x", padx=18, pady=(4, 6))
+
+        tab_nav_box = tk.Frame(nav_container, bg=CARD_SURFACE, highlightbackground=BORDER_COLOR, highlightthickness=1)
+        tab_nav_box.pack(side="left")
+
+        self.btn_nav_transcribe = tk.Label(
+            tab_nav_box,
+            text="🎙️ تبدیل صوت به متن (Speech-to-Text)",
+            font=(FONT_PERSIAN, 10, "bold"),
+            fg=TEXT_PRIMARY,
+            bg=ACCENT_BLUE,
+            padx=18,
+            pady=8,
+            cursor="hand2"
+        )
+        self.btn_nav_transcribe.pack(side="left")
+        self.btn_nav_transcribe.bind("<Button-1>", lambda e: self._switch_main_tab("transcribe"))
+
+        self.btn_nav_video = tk.Label(
+            tab_nav_box,
+            text="🎬 استخراج صوت از ویدیو (Video-to-Audio)",
+            font=(FONT_PERSIAN, 10),
+            fg=TEXT_SECONDARY,
+            bg=CARD_SURFACE,
+            padx=18,
+            pady=8,
+            cursor="hand2"
+        )
+        self.btn_nav_video.pack(side="left")
+        self.btn_nav_video.bind("<Button-1>", lambda e: self._switch_main_tab("video"))
+
+        # محفظه صفحات اصلی (Pages Container)
+        self.pages_container = tk.Frame(self, bg=BG_MAIN)
+        self.pages_container.pack(fill="both", expand=True)
+
+        # صفحه ۱: تبدیل صوت به متن
+        self.page_transcribe = tk.Frame(self.pages_container, bg=BG_MAIN)
+        self.page_transcribe.pack(fill="both", expand=True)
+
+        # صفحه ۲: استخراج صوت از ویدیو
+        self.page_video = tk.Frame(self.pages_container, bg=BG_MAIN)
+
         # ----------------- ۲. کارت انتخاب فایل و تنظیمات بازه‌بندی -----------------
-        panel_cfg = tk.Frame(self, bg=CARD_BG, highlightbackground=BORDER_COLOR, highlightthickness=1)
+        panel_cfg = tk.Frame(self.page_transcribe, bg=CARD_BG, highlightbackground=BORDER_COLOR, highlightthickness=1)
         panel_cfg.pack(fill="x", padx=18, pady=4)
 
         cfg_inner = tk.Frame(panel_cfg, bg=CARD_BG)
@@ -575,7 +679,7 @@ class WhisperFlowStudio(tk.Tk):
         self.lbl_progress_status.pack(side="right")
 
         # ----------------- ۳. فضای کار و نمایش متن (Workspace) -----------------
-        panel_output = tk.Frame(self, bg=CARD_BG, highlightbackground=BORDER_COLOR, highlightthickness=1)
+        panel_output = tk.Frame(self.page_transcribe, bg=CARD_BG, highlightbackground=BORDER_COLOR, highlightthickness=1)
         panel_output.pack(fill="both", expand=True, padx=18, pady=(6, 14))
 
         # هدر تولبار نتایج
@@ -670,6 +774,7 @@ class WhisperFlowStudio(tk.Tk):
         self.current_is_rtl = True
 
         self._render_welcome_message()
+        self._build_video_extractor_ui()
 
     def _create_modern_btn(self, parent, text: str, bg_color: str, hover_color: str, command):
         btn = tk.Label(
@@ -1017,6 +1122,361 @@ class WhisperFlowStudio(tk.Tk):
     @staticmethod
     def _has_persian(text: str) -> bool:
         return any('\u0600' <= c <= '\u06FF' for c in text)
+
+    # --------------------------------------------------------------------------
+    # بخش تب استخراج صوت از ویدیو (Video to Audio Extractor)
+    # --------------------------------------------------------------------------
+    def _switch_main_tab(self, tab_id: str):
+        """تغییر تب اصلی برنامه بین تبدیل صوت به متن و استخراج از ویدیو"""
+        self.current_main_tab = tab_id
+        if tab_id == "transcribe":
+            self.btn_nav_transcribe.configure(bg=ACCENT_BLUE, fg=TEXT_PRIMARY, font=(FONT_PERSIAN, 10, "bold"))
+            self.btn_nav_video.configure(bg=CARD_SURFACE, fg=TEXT_SECONDARY, font=(FONT_PERSIAN, 10))
+            self.page_video.pack_forget()
+            self.page_transcribe.pack(fill="both", expand=True)
+        else:
+            self.btn_nav_video.configure(bg=ACCENT_BLUE, fg=TEXT_PRIMARY, font=(FONT_PERSIAN, 10, "bold"))
+            self.btn_nav_transcribe.configure(bg=CARD_SURFACE, fg=TEXT_SECONDARY, font=(FONT_PERSIAN, 10))
+            self.page_transcribe.pack_forget()
+            self.page_video.pack(fill="both", expand=True)
+            self._refresh_recent_extractions()
+
+    def _build_video_extractor_ui(self):
+        """طراحی رابط کاربری حرفه‌ای استخراج صوت از ویدیو"""
+        # ۱. پنل انتخاب ویدیو و تنظیمات
+        panel_v_input = tk.Frame(self.page_video, bg=CARD_BG, highlightbackground=BORDER_COLOR, highlightthickness=1)
+        panel_v_input.pack(fill="x", padx=18, pady=4)
+
+        v_inner = tk.Frame(panel_v_input, bg=CARD_BG)
+        v_inner.pack(fill="x", padx=16, pady=12)
+
+        title_box = tk.Frame(v_inner, bg=CARD_BG)
+        title_box.pack(fill="x", pady=(0, 10))
+
+        tk.Label(
+            title_box,
+            text="🎬 استخراج فایل صوتی از انواع کلیپ و ویدیو",
+            font=(FONT_PERSIAN, 11, "bold"),
+            fg=TEXT_PRIMARY,
+            bg=CARD_BG
+        ).pack(anchor="w")
+
+        tk.Label(
+            title_box,
+            text="استخراج فوق‌سریع صدا از ویدیوهای MP4, MKV, MOV, AVI, WEBM, FLV بدون افت کیفیت جهت آماده‌سازی برای ویسپر",
+            font=(FONT_PERSIAN, 9),
+            fg=TEXT_SECONDARY,
+            bg=CARD_BG
+        ).pack(anchor="w", pady=(2, 0))
+
+        # ردیف انتخاب ویدیو
+        row_file = tk.Frame(v_inner, bg=CARD_BG)
+        row_file.pack(fill="x", pady=(4, 10))
+
+        self.btn_browse_video = self._create_modern_btn(
+            row_file,
+            text="📁 انتخاب فایل ویدیو (Browse Video)",
+            bg_color=ACCENT_BLUE,
+            hover_color=ACCENT_BLUE_HOVER,
+            command=self._browse_video
+        )
+        self.btn_browse_video.pack(side="left")
+
+        self.lbl_video_display = tk.Label(
+            row_file,
+            text="هیچ فایل ویدیویی انتخاب نشده است (فرمت‌های MP4, MKV, MOV, AVI, WEBM, FLV پشتیبانی می‌شوند)",
+            font=(FONT_FAMILY, 9),
+            fg=TEXT_MUTED,
+            bg=CARD_BG,
+            anchor="w"
+        )
+        self.lbl_video_display.pack(side="left", fill="x", expand=True, padx=14)
+
+        self.btn_extract_audio = self._create_modern_btn(
+            row_file,
+            text="⚡ شروع استخراج صوت",
+            bg_color=ACCENT_GREEN,
+            hover_color=ACCENT_GREEN_HOVER,
+            command=self._start_video_extraction_thread
+        )
+        self.btn_extract_audio.pack(side="right")
+
+        # ردیف تنظیمات فرمت و انتقال خودکار
+        row_opts = tk.Frame(v_inner, bg=CARD_BG)
+        row_opts.pack(fill="x", pady=(2, 0))
+
+        tk.Label(row_opts, text="فرمت صوت استخراجی:", font=(FONT_PERSIAN, 9), fg=TEXT_SECONDARY, bg=CARD_BG).pack(side="left", padx=(0, 6))
+
+        self.video_fmt_var = tk.StringVar(value="MP3 (کیفیت عالی 192kbps - حجم سبک)")
+        self.combo_video_fmt = ttk.Combobox(
+            row_opts,
+            textvariable=self.video_fmt_var,
+            values=[
+                "MP3 (کیفیت عالی 192kbps - حجم سبک)",
+                "WAV (استودیویی 16kHz - بدون فشرده‌سازی و بهینه ویسپر)"
+            ],
+            state="readonly",
+            width=36
+        )
+        self.combo_video_fmt.pack(side="left", padx=(0, 16))
+
+        self.auto_switch_var = tk.BooleanVar(value=True)
+        self.chk_auto_switch = tk.Checkbutton(
+            row_opts,
+            text="انتقال خودکار به بخش تبدیل به متن پس از استخراج",
+            variable=self.auto_switch_var,
+            font=(FONT_PERSIAN, 9),
+            fg=TEXT_PRIMARY,
+            bg=CARD_BG,
+            activebackground=CARD_BG,
+            activeforeground=TEXT_PRIMARY,
+            selectcolor=CARD_SURFACE
+        )
+        self.chk_auto_switch.pack(side="left")
+
+        self.lbl_video_status = tk.Label(
+            row_opts,
+            text="",
+            font=(FONT_PERSIAN, 9, "bold"),
+            fg=ACCENT_BLUE_HOVER,
+            bg=CARD_BG
+        )
+        self.lbl_video_status.pack(side="right")
+
+        # ۲. پنل نتیجه استخراج و تاریخچه فایل‌ها
+        panel_history = tk.Frame(self.page_video, bg=CARD_BG, highlightbackground=BORDER_COLOR, highlightthickness=1)
+        panel_history.pack(fill="both", expand=True, padx=18, pady=(6, 14))
+
+        # بنر تبریک موفقیت استخراج (داینامیک)
+        self.frame_video_success = tk.Frame(panel_history, bg=CARD_SURFACE, highlightbackground=ACCENT_GREEN, highlightthickness=1)
+
+        success_top = tk.Frame(self.frame_video_success, bg=CARD_SURFACE)
+        success_top.pack(fill="x", padx=16, pady=(10, 4))
+
+        tk.Label(
+            success_top,
+            text="✅ فایل صوتی ویدیو با موفقیت استخراج شد!",
+            font=(FONT_PERSIAN, 11, "bold"),
+            fg=ACCENT_GREEN,
+            bg=CARD_SURFACE
+        ).pack(side="left")
+
+        self.lbl_video_success_meta = tk.Label(
+            success_top,
+            text="",
+            font=(FONT_FAMILY, 9),
+            fg=TEXT_SECONDARY,
+            bg=CARD_SURFACE
+        )
+        self.lbl_video_success_meta.pack(side="left", padx=16)
+
+        success_actions = tk.Frame(self.frame_video_success, bg=CARD_SURFACE)
+        success_actions.pack(fill="x", padx=16, pady=(4, 10))
+
+        self.btn_send_direct = self._create_modern_btn(
+            success_actions,
+            text="🚀 ارسال مستقیم به بخش تبدیل به متن (Whisper)",
+            bg_color=ACCENT_GREEN,
+            hover_color=ACCENT_GREEN_HOVER,
+            command=self._send_last_extracted_to_transcriber
+        )
+        self.btn_send_direct.pack(side="left", padx=(0, 8))
+
+        self.btn_play_direct = self._create_small_btn(
+            success_actions,
+            "▶️ پخش صوت در ویندوز",
+            self._play_last_extracted_audio
+        )
+        self.btn_play_direct.pack(side="left", padx=4)
+
+        self.btn_folder_direct = self._create_small_btn(
+            success_actions,
+            "📂 باز کردن پوشه فایل‌ها",
+            self._open_extractions_folder
+        )
+        self.btn_folder_direct.pack(side="left", padx=4)
+
+        # تاریخچه استخراج‌ها
+        hist_header = tk.Frame(panel_history, bg=CARD_BG)
+        hist_header.pack(fill="x", padx=16, pady=(12, 6))
+
+        tk.Label(
+            hist_header,
+            text="📋 فایل‌های صوتی استخراج‌شده اخیر (پوشه extracted_audio):",
+            font=(FONT_PERSIAN, 10, "bold"),
+            fg=TEXT_PRIMARY,
+            bg=CARD_BG
+        ).pack(side="left")
+
+        btn_refresh = self._create_small_btn(hist_header, "🔄 بروزرسانی", self._refresh_recent_extractions)
+        btn_refresh.pack(side="right", padx=3)
+
+        btn_open_dir = self._create_small_btn(hist_header, "📁 پوشه خروجی", self._open_extractions_folder)
+        btn_open_dir.pack(side="right", padx=3)
+
+        self.frame_recent_list = tk.Frame(panel_history, bg="#111822", highlightbackground=BORDER_COLOR, highlightthickness=1)
+        self.frame_recent_list.pack(fill="both", expand=True, padx=16, pady=(4, 14))
+
+        self._refresh_recent_extractions()
+
+    def _browse_video(self):
+        chosen = filedialog.askopenfilename(
+            title="انتخاب فایل ویدیو برای استخراج صدا",
+            filetypes=[
+                ("All Supported Videos", "*.mp4 *.mkv *.mov *.avi *.webm *.flv *.wmv *.m4v *.3gp"),
+                ("MP4 Files", "*.mp4"),
+                ("MKV Files", "*.mkv"),
+                ("MOV Files", "*.mov"),
+                ("All Files", "*.*")
+            ]
+        )
+        if chosen:
+            self.selected_video_path = chosen
+            name = Path(chosen).name
+            size_mb = os.path.getsize(chosen) / (1024 * 1024)
+            self.lbl_video_display.configure(
+                text=f"✓ انتخاب شد: {name} ({size_mb:.1f} MB)",
+                fg=ACCENT_GREEN
+            )
+
+    def _start_video_extraction_thread(self):
+        if not self.selected_video_path or not os.path.exists(self.selected_video_path):
+            messagebox.showwarning("توجه", "لطفاً ابتدا یک فایل ویدیویی را با دکمه «انتخاب فایل ویدیو» مشخص کنید.")
+            return
+
+        if self.is_extracting_audio:
+            return
+
+        self.is_extracting_audio = True
+        self.btn_extract_audio.configure(bg=TEXT_MUTED, cursor="wait")
+        self.lbl_video_status.configure(text="⏳ در حال استخراج صدا با موتور FFmpeg...", fg=ACCENT_YELLOW)
+
+        fmt_raw = self.combo_video_fmt.get().split()[0].lower()
+        output_fmt = "wav" if "wav" in fmt_raw else "mp3"
+
+        def worker():
+            try:
+                out_file, elapsed = extract_audio_from_video(self.selected_video_path, output_fmt)
+                self.last_extracted_audio_path = out_file
+                self.after(0, lambda: self._on_video_extraction_complete(out_file, elapsed))
+            except Exception as e:
+                err_str = str(e) if str(e) else repr(e)
+                self.after(0, lambda msg=err_str: self._on_video_extraction_error(msg))
+            finally:
+                self.is_extracting_audio = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_video_extraction_complete(self, out_file: str, elapsed: float):
+        self.btn_extract_audio.configure(bg=ACCENT_GREEN, cursor="hand2")
+        self.lbl_video_status.configure(text=f"✓ استخراج با موفقیت در {elapsed:.1f} ثانیه انجام شد!", fg=ACCENT_GREEN)
+
+        name = Path(out_file).name
+        size_mb = os.path.getsize(out_file) / (1024 * 1024)
+        self.lbl_video_success_meta.configure(
+            text=f"فایل: {name}  |  حجم: {size_mb:.2f} MB  |  زمان استخراج: {elapsed:.1f}s ⚡"
+        )
+        self.frame_video_success.pack(fill="x", padx=16, pady=8)
+        self._refresh_recent_extractions()
+
+        if self.auto_switch_var.get():
+            self.after(600, lambda: self._send_extracted_to_transcriber(out_file))
+
+    def _on_video_extraction_error(self, err_msg: str):
+        self.btn_extract_audio.configure(bg=ACCENT_GREEN, cursor="hand2")
+        self.lbl_video_status.configure(text="❌ خطا در استخراج صوت", fg=ACCENT_RED)
+        messagebox.showerror("خطا در استخراج صوت", f"خطایی رخ داد:\n\n{err_msg}")
+
+    def _send_last_extracted_to_transcriber(self):
+        if self.last_extracted_audio_path and os.path.exists(self.last_extracted_audio_path):
+            self._send_extracted_to_transcriber(self.last_extracted_audio_path)
+        else:
+            messagebox.showinfo("پیام", "فایلی برای انتقال یافت نشد.")
+
+    def _send_extracted_to_transcriber(self, filepath: str):
+        if not os.path.exists(filepath):
+            messagebox.showerror("خطا", "فایل صوتی یافت نشد.")
+            return
+
+        self.selected_file_path = filepath
+        name = Path(filepath).name
+        size_mb = os.path.getsize(filepath) / (1024 * 1024)
+        self.lbl_file_display.configure(
+            text=f"✓ انتخاب شد از ویدیو: {name} ({size_mb:.1f} MB)",
+            fg=ACCENT_GREEN
+        )
+        self._switch_main_tab("transcribe")
+
+    def _play_last_extracted_audio(self):
+        if self.last_extracted_audio_path and os.path.exists(self.last_extracted_audio_path):
+            self._play_audio(Path(self.last_extracted_audio_path))
+
+    def _play_audio(self, filepath: Path):
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(filepath))
+        except Exception as e:
+            messagebox.showerror("خطا", f"امکان پخش فایل وجود ندارد:\n{e}")
+
+    def _delete_extracted_file(self, filepath: Path):
+        try:
+            if filepath.exists():
+                filepath.unlink()
+                self._refresh_recent_extractions()
+        except Exception as e:
+            messagebox.showerror("خطا", f"خطا در حذف فایل:\n{e}")
+
+    def _open_extractions_folder(self):
+        EXTRACTIONS_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(EXTRACTIONS_DIR))
+        except Exception:
+            pass
+
+    def _refresh_recent_extractions(self):
+        if not hasattr(self, 'frame_recent_list'):
+            return
+
+        for child in self.frame_recent_list.winfo_children():
+            child.destroy()
+
+        files = list(EXTRACTIONS_DIR.glob("*.mp3")) + list(EXTRACTIONS_DIR.glob("*.wav"))
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+        if not files:
+            lbl_empty = tk.Label(
+                self.frame_recent_list,
+                text="هنوز هیچ فایل صوتی استخراج نشده است. با انتخاب ویدیو در بالا، فایل صوتی آن اینجا ذخیره می‌شود.",
+                font=(FONT_PERSIAN, 9),
+                fg=TEXT_MUTED,
+                bg="#111822"
+            )
+            lbl_empty.pack(pady=35)
+            return
+
+        for p in files[:7]:
+            row = tk.Frame(self.frame_recent_list, bg=CARD_SURFACE, highlightbackground=BORDER_COLOR, highlightthickness=1)
+            row.pack(fill="x", pady=3, padx=10)
+
+            size_mb = p.stat().st_size / (1024 * 1024)
+            mtime = datetime.datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            info_text = f"🎵  {p.name}   |   {size_mb:.2f} MB   |   {mtime}"
+
+            lbl_info = tk.Label(row, text=info_text, font=(FONT_FAMILY, 9), fg=TEXT_PRIMARY, bg=CARD_SURFACE, anchor="w")
+            lbl_info.pack(side="left", padx=10, fill="x", expand=True)
+
+            btn_del = tk.Label(row, text="🗑️", font=(FONT_FAMILY, 9), fg=TEXT_MUTED, bg=CARD_SURFACE, cursor="hand2", padx=6, pady=4)
+            btn_del.pack(side="right", padx=3)
+            btn_del.bind("<Button-1>", lambda e, path=p: self._delete_extracted_file(path))
+
+            btn_play = tk.Label(row, text="▶️ پخش", font=(FONT_PERSIAN, 8), fg=TEXT_SECONDARY, bg="#27384f", cursor="hand2", padx=8, pady=4)
+            btn_play.pack(side="right", padx=3)
+            btn_play.bind("<Button-1>", lambda e, path=p: self._play_audio(path))
+
+            btn_send = tk.Label(row, text="🚀 ارسال به متن‌نویس", font=(FONT_PERSIAN, 8, "bold"), fg=TEXT_PRIMARY, bg=ACCENT_GREEN, cursor="hand2", padx=10, pady=4)
+            btn_send.pack(side="right", padx=5)
+            btn_send.bind("<Button-1>", lambda e, path=p: self._send_extracted_to_transcriber(str(path)))
 
 
 # ==============================================================================

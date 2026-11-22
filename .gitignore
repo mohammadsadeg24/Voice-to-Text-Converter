@@ -25,8 +25,9 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# Archives & ZIP files
-*.zip
+# Binaries and executables
+*.exe
+ffmpeg.exe
 *.tar.gz
 *.rar
 *.7z
@@ -40,6 +41,8 @@ transcriptions/*
 !transcriptions/.gitkeep
 recordings/*
 !recordings/.gitkeep
+extracted_audio/*
+!extracted_audio/.gitkeep
 
 # Environments & Virtual Environments
 .env
