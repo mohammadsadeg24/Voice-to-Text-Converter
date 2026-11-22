@@ -187,9 +187,13 @@ def load_audio_safely(filepath: str) -> Tuple[np.ndarray, float]:
     return data, duration
 
 
-def extract_audio_from_video(video_path: str, output_format: str = "mp3") -> Tuple[str, float]:
+def extract_audio_from_video(
+    video_path: str,
+    output_format: str = "mp3",
+    on_process_start=None
+) -> Tuple[str, float]:
     """
-    استخراج مستقیم و فوق‌سریع صدای ویدیو با استفاده از موتور FFmpeg (بدون افت کیفیت)
+    استخراج مستقیم و فوق‌سریع صدای ویدیو با استفاده از موتور FFmpeg (بدون افت کیفیت و با قابلیت لغو آنی)
     """
     setup_ffmpeg_environment()
     ffmpeg_exe = shutil.which("ffmpeg")
@@ -224,14 +228,26 @@ def extract_audio_from_video(video_path: str, output_format: str = "mp3") -> Tup
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
-    res = subprocess.run(
+    proc = subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         startupinfo=startupinfo
     )
-    if res.returncode != 0:
-        err_msg = res.stderr.decode("utf-8", errors="replace")[-300:]
+    if on_process_start:
+        on_process_start(proc)
+
+    stderr_bytes = proc.communicate()[1]
+    if proc.returncode != 0:
+        if getattr(proc, "_was_cancelled", False):
+            if out_file.exists():
+                try:
+                    out_file.unlink()
+                except Exception:
+                    pass
+            raise InterruptedError("Extraction cancelled by user")
+
+        err_msg = stderr_bytes.decode("utf-8", errors="replace")[-300:]
         raise RuntimeError(f"خطا در استخراج صوت توسط FFmpeg:\n{err_msg}")
 
     elapsed = time.time() - start_t
@@ -411,10 +427,16 @@ class WhisperFlowStudio(tk.Tk):
         self._setup_responsive_window()
 
         # وضعیت‌های برنامه
-        self.current_model_name = "large-v3"  # بالاترین دقت ممکن — فقط یک‌بار دانلود
+        self.current_model_name = "small"  # بهینه‌ترین مدل (سبک، پرسرعت، دقت عالی فارسی، بدون کرش VRAM)
         self.whisper_model = None
         self.is_loading_model = False
         self.is_transcribing = False
+        self._cancel_transcription_requested = False
+
+        # سخت‌افزار پیش‌فرض (GPU در صورت وجود، در غیر این صورت CPU)
+        default_dev, _ = self._detect_best_device()
+        self._target_device = default_dev
+        self._active_device = default_dev
 
         self.selected_file_path: Optional[str] = None
         self.current_audio_duration: float = 0.0
@@ -426,6 +448,7 @@ class WhisperFlowStudio(tk.Tk):
         self.selected_video_path: Optional[str] = None
         self.is_extracting_audio = False
         self.last_extracted_audio_path: Optional[str] = None
+        self._current_video_proc = None
 
         # ساخت لایه‌های گرافیکی
         self._build_interface()
@@ -577,19 +600,17 @@ class WhisperFlowStudio(tk.Tk):
             bg=CARD_BG
         ).pack(side="left", padx=(0, 4))
 
-        self.model_var = tk.StringVar(value="large-v3 (بالاترین دقت — پیشنهادی)")
+        self.model_var = tk.StringVar(value="small (پیشنهادی — سرعت و دقت بهینه)")
         self.model_combo = ttk.Combobox(
             model_frame,
             textvariable=self.model_var,
             values=[
-                "large-v3 (بالاترین دقت — پیشنهادی)",
-                "medium (دقت بالا — سبک‌تر)",
-                "small (متوسط — سریع)",
+                "small (پیشنهادی — سرعت و دقت بهینه)",
                 "base (سریع و سبک)",
                 "tiny (فوق‌العاده سبک)"
             ],
             state="readonly",
-            width=26
+            width=28
         )
         self.model_combo.pack(side="left")
         self.model_combo.bind("<<ComboboxSelected>>", self._on_change_model)
@@ -691,7 +712,16 @@ class WhisperFlowStudio(tk.Tk):
         )
         self.btn_transcribe.pack(side="right")
 
-        # ردیف ۲: آپشن‌های بازه‌بندی ۳۰ ثانیه‌ای و زبان
+        # دکمه لغو تبدیل (در زمان شروع پردازش در کنار دکمه شروع قرار می‌گیرد)
+        self.btn_cancel_transcribe = self._create_modern_btn(
+            row_file,
+            text="⏹️ لغو تبدیل",
+            bg_color=ACCENT_RED,
+            hover_color="#dc2626",
+            command=self._cancel_transcription
+        )
+
+        # ردیف ۲: آپشن‌های بازه‌بندی ۳۰ ثانیه‌ای، انتخاب سخت‌افزار و وضعیت
         row_opts = tk.Frame(cfg_inner, bg=CARD_BG)
         row_opts.pack(fill="x", pady=(6, 0))
 
@@ -699,7 +729,7 @@ class WhisperFlowStudio(tk.Tk):
         self.interval_active_var = tk.BooleanVar(value=True)
         self.chk_interval = tk.Checkbutton(
             row_opts,
-            text="بازه‌بندی متن‌ها بر اساس بازه زمانی ۳۰ ثانیه‌ای",
+            text="بازه‌بندی بر اساس بازه زمانی ۳۰ ثانیه‌ای",
             variable=self.interval_active_var,
             font=(FONT_PERSIAN, 9, "bold"),
             fg=TEXT_PRIMARY,
@@ -712,7 +742,7 @@ class WhisperFlowStudio(tk.Tk):
 
         # طول بازه زمانی
         interval_box = tk.Frame(row_opts, bg=CARD_BG)
-        interval_box.pack(side="left", padx=14)
+        interval_box.pack(side="left", padx=8)
 
         tk.Label(interval_box, text="طول هر بازه:", font=(FONT_PERSIAN, 8), fg=TEXT_SECONDARY, bg=CARD_BG).pack(side="left", padx=(0, 4))
         self.interval_sec_var = tk.StringVar(value="30")
@@ -721,15 +751,51 @@ class WhisperFlowStudio(tk.Tk):
             textvariable=self.interval_sec_var,
             values=["15", "30", "45", "60", "90"],
             state="readonly",
-            width=5
+            width=4
         )
         self.combo_interval.pack(side="left")
         tk.Label(interval_box, text="ثانیه", font=(FONT_PERSIAN, 8), fg=TEXT_SECONDARY, bg=CARD_BG).pack(side="left", padx=(4, 0))
 
+        # دراپ‌داون انتخاب سخت‌افزار پردازشی (GPU یا CPU)
+        hw_box = tk.Frame(row_opts, bg=CARD_BG)
+        hw_box.pack(side="left", padx=10)
+
+        tk.Label(
+            hw_box,
+            text="سخت‌افزار:",
+            font=(FONT_PERSIAN, 8, "bold"),
+            fg=TEXT_SECONDARY,
+            bg=CARD_BG
+        ).pack(side="left", padx=(0, 4))
+
+        gpu_avail = False
+        try:
+            import torch
+            gpu_avail = torch.cuda.is_available()
+        except Exception:
+            pass
+
+        self.device_options = []
+        if gpu_avail:
+            self.device_options.append("⚡ کارت گرافیک (GPU)")
+        self.device_options.append("🖥️ پردازنده (CPU)")
+
+        init_choice = self.device_options[0] if gpu_avail and self._target_device == "cuda" else "🖥️ پردازنده (CPU)"
+        self.device_var = tk.StringVar(value=init_choice)
+        self.combo_device = ttk.Combobox(
+            hw_box,
+            textvariable=self.device_var,
+            values=self.device_options,
+            state="readonly",
+            width=17
+        )
+        self.combo_device.pack(side="left")
+        self.combo_device.bind("<<ComboboxSelected>>", self._on_device_changed)
+
         # راهنما
         lbl_hint = tk.Label(
             row_opts,
-            text="(فایل‌ها و ویس‌های زیر ۳۰ ثانیه خودکار یکپارچه می‌شوند)",
+            text="(ویس‌های زیر ۳۰ ثانیه خودکار یکپارچه می‌شوند)",
             font=(FONT_PERSIAN, 8),
             fg=TEXT_MUTED,
             bg=CARD_BG
@@ -880,19 +946,19 @@ class WhisperFlowStudio(tk.Tk):
         self.text_editor.delete("1.0", "end")
         msg = (
             "به نرم‌افزار WhisperFlow Studio Pro v3.0 خوش آمدید!\n\n"
-            "ویژگی‌های کلیدی نسخه ۳.۰:\n"
-            "۱. مدل هوش مصنوعی: OpenAI Whisper Large-v3 (بالاترین دقت ممکن — ۱.۵ گیگابایت)\n"
-            "   فقط یک‌بار دانلود می‌شود و در اجراهای بعدی کاملاً آفلاین کار می‌کند.\n"
-            "۲. شناسایی خودکار کارت گرافیک NVIDIA: اگر GPU دارید، پردازش تا ۱۰ برابر سریع‌تر خواهد بود.\n"
-            "۳. بازه‌بندی هوشمند ۳۰ ثانیه‌ای: فایل‌های طولانی (حتی تا ۱ ساعت) به بازه‌های [00:00 - 00:30] تفکیک می‌شوند.\n"
-            "۴. فایل‌های صوتی کمتر از ۳۰ ثانیه به صورت خودکار به شکل یک متن یکپارچه نمایش داده می‌شوند.\n"
-            "۵. خروجی در قالب فایل متنی استاندارد UTF-8 ذخیره شده و با یک کلیک در Notepad باز می‌شود.\n\n"
-            "برای شروع، روی دکمه «📁 انتخاب فایل صوتی» کلیک کنید."
+            "ویژگی‌های کلیدی نرم‌افزار:\n"
+            "۱. مدل هوش مصنوعی بهینه Small: مدل فوق‌العاده سریع و دقیق، کاملاً سازگار با انواع کارت گرافیک و پردازنده بدون مصرف بی‌رویه رم یا کرش سیستم.\n"
+            "۲. انتخاب سخت‌افزار پردازشی: امکان سوییچ آزادانه بین کارت گرافیک (GPU) و پردازنده (CPU) قبل از شروع هر تبدیل.\n"
+            "۳. دکمه لغو آنی: امکان لغو و انصراف در هر لحظه از فرآیند تبدیل به متن یا استخراج ویدیو با یک کلیک.\n"
+            "۴. بازه‌بندی هوشمند ۳۰ ثانیه‌ای: تفکیک دقیق متن‌ها به بازه‌های زمانی استاندارد [00:00 - 00:30] برای سهولت بازخوانی.\n"
+            "۵. استخراج صوت از ویدیو: جداسازی بی‌درنگ صدای ویدیوها با موتور FFmpeg در تب مجزا.\n"
+            "۶. خروجی استاندارد UTF-8 و امکان باز کردن مستقیم در Notepad ویندوز.\n\n"
+            "برای شروع، فایل صوتی خود را انتخاب کرده و روی «شروع استخراج و بازه‌بندی» کلیک کنید."
         )
         self.text_editor.insert("1.0", msg, "rtl")
 
     # --------------------------------------------------------------------------
-    # مدیریت مدل در حافظه RAM (یک‌بار لود، مصرف اینترنت: صفر)
+    # مدیریت مدل در حافظه RAM و انتخاب سخت‌افزار (GPU / CPU)
     # --------------------------------------------------------------------------
     def _detect_best_device(self):
         """شناسایی خودکار بهترین سخت‌افزار پردازشی (CUDA GPU > CPU)"""
@@ -907,13 +973,13 @@ class WhisperFlowStudio(tk.Tk):
         return "cpu", "CPU"
 
     def _load_model_into_memory(self):
-        """لود مدل هوش مصنوعی در رم و بررسی پوشه محلی models/"""
+        """لود مدل هوش مصنوعی در رم متناسب با سخت‌افزار انتخابی کاربر (GPU یا CPU)"""
         def worker():
             self.is_loading_model = True
             model_target = self.current_model_name
+            target_device = getattr(self, "_target_device", "cpu")
 
-            # شناسایی بهترین سخت‌افزار
-            device, hw_label = self._detect_best_device()
+            hw_label = "کارت گرافیک (GPU)" if target_device == "cuda" else "پردازنده (CPU)"
 
             self.after(0, lambda: self.lbl_ram_status.configure(
                 text=f"⏳ بارگذاری مدل {model_target.upper()} روی {hw_label}...",
@@ -923,27 +989,24 @@ class WhisperFlowStudio(tk.Tk):
             try:
                 import whisper
 
-                # ۱. بررسی اینکه آیا فایل مدل در پوشه محلی models/ وجود دارد یا خیر (برای پرتابل بودن روی سیستم همکار)
+                # ۱. بررسی فایل مدل در پوشه محلی models/
                 local_model_file = MODELS_DIR / f"{model_target}.pt"
-                if local_model_file.exists():
-                    model_path_or_name = str(local_model_file)
-                else:
-                    model_path_or_name = model_target
+                model_path_or_name = str(local_model_file) if local_model_file.exists() else model_target
 
-                # لود مدل روی بهترین سخت‌افزار موجود
-                model = whisper.load_model(model_path_or_name, device=device)
+                # لود مدل روی سخت‌افزار مدنظر کاربر
+                model = whisper.load_model(model_path_or_name, device=target_device)
                 self.whisper_model = model
-                self._active_device = device
+                self._active_device = target_device
 
-                speed_label = "⚡ GPU — سرعت بالا" if device == "cuda" else "🖥️ CPU"
+                speed_label = "⚡ GPU — سرعت بالا" if target_device == "cuda" else "🖥️ CPU"
                 self.after(0, lambda: self.lbl_ram_status.configure(
                     text=f"🟢 مدل {model_target.upper()} آماده ({speed_label})",
                     fg=ACCENT_GREEN
                 ))
 
             except Exception as e:
-                # اگر روی GPU خطا داد، فال‌بک به CPU
-                if device == "cuda":
+                # اگر روی GPU خطا داد، فال‌بک خودکار به CPU
+                if target_device == "cuda":
                     try:
                         import whisper as w2
                         local_model_file = MODELS_DIR / f"{model_target}.pt"
@@ -951,8 +1014,10 @@ class WhisperFlowStudio(tk.Tk):
                         model = w2.load_model(path_or_name, device="cpu")
                         self.whisper_model = model
                         self._active_device = "cpu"
+                        self._target_device = "cpu"
+                        self.after(0, lambda: self.device_var.set("🖥️ پردازنده (CPU)"))
                         self.after(0, lambda: self.lbl_ram_status.configure(
-                            text=f"🟢 مدل {model_target.upper()} آماده (🖥️ CPU — فال‌بک)",
+                            text=f"🟢 مدل {model_target.upper()} آماده (🖥️ CPU — فال‌بک خودکار)",
                             fg=ACCENT_GREEN
                         ))
                         return
@@ -968,7 +1033,24 @@ class WhisperFlowStudio(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _on_device_changed(self, event=None):
+        """تغییر سخت‌افزار پردازشی توسط کاربر (GPU / CPU)"""
+        if getattr(self, "is_transcribing", False) or getattr(self, "is_loading_model", False):
+            messagebox.showinfo("لطفاً صبر کنید", "در حین پردازش یا بارگذاری امکان تغییر سخت‌افزار وجود ندارد.")
+            cur = "⚡ کارت گرافیک (GPU)" if getattr(self, "_target_device", "cpu") == "cuda" else "🖥️ پردازنده (CPU)"
+            self.device_var.set(cur)
+            return
+
+        choice = self.device_var.get()
+        target = "cuda" if "GPU" in choice else "cpu"
+        if target != getattr(self, "_target_device", "cpu"):
+            self._target_device = target
+            self._load_model_into_memory()
+
     def _on_change_model(self, event=None):
+        if getattr(self, "is_transcribing", False) or getattr(self, "is_loading_model", False):
+            messagebox.showinfo("لطفاً صبر کنید", "در حین پردازش یا بارگذاری امکان تغییر مدل وجود ندارد.")
+            return
         selected_raw = self.model_var.get().split()[0].lower()
         if selected_raw != self.current_model_name:
             self.current_model_name = selected_raw
@@ -997,6 +1079,18 @@ class WhisperFlowStudio(tk.Tk):
                 fg=ACCENT_GREEN
             )
 
+    def _cancel_transcription(self):
+        """درخواست لغو فرآیند تبدیل صوت به متن توسط کاربر"""
+        self._cancel_transcription_requested = True
+        self.lbl_progress_status.configure(text="⏳ در حال لغو عملیات...", fg=ACCENT_YELLOW)
+        self.btn_cancel_transcribe.configure(bg=TEXT_MUTED, cursor="wait")
+
+    def _on_transcription_cancelled(self):
+        """بازنشانی رابط کاربری پس از لغو موفقیت‌آمیز تبدیل"""
+        self.btn_transcribe.configure(bg=ACCENT_GREEN, cursor="hand2")
+        self.btn_cancel_transcribe.pack_forget()
+        self.lbl_progress_status.configure(text="⏹️ عملیات تبدیل به متن توسط کاربر لغو شد.", fg=ACCENT_YELLOW)
+
     def _start_transcription_thread(self):
         if not self.selected_file_path:
             messagebox.showwarning("توجه", "لطفاً ابتدا یک فایل صوتی را با دکمه «انتخاب فایل صوتی» مشخص کنید.")
@@ -1013,24 +1107,37 @@ class WhisperFlowStudio(tk.Tk):
         if self.is_transcribing:
             return
 
+        self._cancel_transcription_requested = False
         self.is_transcribing = True
         self.btn_transcribe.configure(bg=TEXT_MUTED, cursor="wait")
+        self.btn_cancel_transcribe.pack(side="right", padx=(0, 8))
         self.lbl_progress_status.configure(text="⏳ در حال خواندن صوت و آماده‌سازی...", fg=ACCENT_BLUE_HOVER)
 
         def worker():
             start_t = time.time()
+            orig_decode = None
             try:
                 # ۱. خواندن ایمن فایل صوتی بدون نیاز به FFmpeg
                 audio_arr, duration = load_audio_safely(self.selected_file_path)
                 self.current_audio_duration = duration
 
+                if getattr(self, "_cancel_transcription_requested", False):
+                    raise InterruptedError("Cancelled")
+
                 self.after(0, lambda: self.lbl_progress_status.configure(
                     text=f"⏳ در حال پردازش کلمات با مدل {self.current_model_name.upper()} ({duration:.1f}s)..."
                 ))
 
+                # هوک لغو بلادرنگ بر روی متد decode مدل ویسپر
+                if self.whisper_model and hasattr(self.whisper_model, "decode"):
+                    orig_decode = self.whisper_model.decode
+                    def cancellable_decode(*args, **kwargs):
+                        if getattr(self, "_cancel_transcription_requested", False):
+                            raise InterruptedError("Cancelled")
+                        return orig_decode(*args, **kwargs)
+                    self.whisper_model.decode = cancellable_decode
+
                 # ۲. استخراج کلمات و تایم‌استمپ‌ها
-                # - حالت GPU: استفاده از هسته‌های CUDA با fp16=False برای جلوگیری کامل از خطای NaN روی کارت‌های سری ۱۶ و تورینگ
-                # - بالاترین دقت با Beam Search و مقایسه چندگانه
                 use_cuda = getattr(self, '_active_device', 'cpu') == 'cuda'
                 if use_cuda:
                     try:
@@ -1061,6 +1168,9 @@ class WhisperFlowStudio(tk.Tk):
                     initial_prompt="این یک فایل صوتی گفتاری به زبان فارسی و انگلیسی است. لطفاً تمام کلمات را با دقت بالا رونویسی کنید.",
                     **transcribe_params
                 )
+
+                if getattr(self, "_cancel_transcription_requested", False):
+                    raise InterruptedError("Cancelled")
 
                 elapsed = time.time() - start_t
                 detected_lang = result.get("language", "fa")
@@ -1103,11 +1213,24 @@ class WhisperFlowStudio(tk.Tk):
                     lang=detected_lang
                 ))
 
+            except InterruptedError:
+                self.after(0, self._on_transcription_cancelled)
             except Exception as e:
                 err_str = str(e) if str(e) else repr(e)
                 self.after(0, lambda msg=err_str: self._on_transcription_error(msg))
             finally:
+                if orig_decode and self.whisper_model:
+                    self.whisper_model.decode = orig_decode
                 self.is_transcribing = False
+                self._cancel_transcription_requested = False
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                self.after(0, lambda: self.btn_cancel_transcribe.pack_forget())
+                self.after(0, lambda: self.btn_transcribe.configure(bg=ACCENT_GREEN, cursor="hand2"))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1294,6 +1417,15 @@ class WhisperFlowStudio(tk.Tk):
         )
         self.btn_extract_audio.pack(side="right")
 
+        # دکمه لغو استخراج ویدیو (در زمان استخراج در کنار دکمه شروع قرار می‌گیرد)
+        self.btn_cancel_video = self._create_modern_btn(
+            row_file,
+            text="⏹️ لغو استخراج",
+            bg_color=ACCENT_RED,
+            hover_color="#dc2626",
+            command=self._cancel_video_extraction
+        )
+
         # ردیف تنظیمات فرمت و انتقال خودکار
         row_opts = tk.Frame(v_inner, bg=CARD_BG)
         row_opts.pack(fill="x", pady=(2, 0))
@@ -1457,6 +1589,23 @@ class WhisperFlowStudio(tk.Tk):
                 fg=ACCENT_GREEN
             )
 
+    def _cancel_video_extraction(self):
+        """لغو فرآیند استخراج صوت از ویدیو توسط کاربر"""
+        if hasattr(self, "_current_video_proc") and self._current_video_proc:
+            self._current_video_proc._was_cancelled = True
+            try:
+                self._current_video_proc.kill()
+            except Exception:
+                pass
+        self.lbl_video_status.configure(text="⏳ در حال لغو استخراج...", fg=ACCENT_YELLOW)
+        self.btn_cancel_video.configure(bg=TEXT_MUTED, cursor="wait")
+
+    def _on_video_extraction_cancelled(self):
+        """بازنشانی رابط کاربری پس از لغو استخراج ویدیو"""
+        self.btn_extract_audio.configure(bg=ACCENT_GREEN, cursor="hand2")
+        self.btn_cancel_video.pack_forget()
+        self.lbl_video_status.configure(text="⏹️ عملیات استخراج ویدیو توسط کاربر لغو شد.", fg=ACCENT_YELLOW)
+
     def _start_video_extraction_thread(self):
         if not self.selected_video_path or not os.path.exists(self.selected_video_path):
             messagebox.showwarning("توجه", "لطفاً ابتدا یک فایل ویدیویی را با دکمه «انتخاب فایل ویدیو» مشخص کنید.")
@@ -1467,21 +1616,34 @@ class WhisperFlowStudio(tk.Tk):
 
         self.is_extracting_audio = True
         self.btn_extract_audio.configure(bg=TEXT_MUTED, cursor="wait")
+        self.btn_cancel_video.pack(side="right", padx=(0, 8))
         self.lbl_video_status.configure(text="⏳ در حال استخراج صدا با موتور FFmpeg...", fg=ACCENT_YELLOW)
 
         fmt_raw = self.combo_video_fmt.get().split()[0].lower()
         output_fmt = "wav" if "wav" in fmt_raw else "mp3"
 
+        def on_proc(proc):
+            self._current_video_proc = proc
+
         def worker():
             try:
-                out_file, elapsed = extract_audio_from_video(self.selected_video_path, output_fmt)
+                out_file, elapsed = extract_audio_from_video(
+                    self.selected_video_path,
+                    output_fmt,
+                    on_process_start=on_proc
+                )
                 self.last_extracted_audio_path = out_file
                 self.after(0, lambda: self._on_video_extraction_complete(out_file, elapsed))
+            except InterruptedError:
+                self.after(0, self._on_video_extraction_cancelled)
             except Exception as e:
                 err_str = str(e) if str(e) else repr(e)
                 self.after(0, lambda msg=err_str: self._on_video_extraction_error(msg))
             finally:
                 self.is_extracting_audio = False
+                self._current_video_proc = None
+                self.after(0, lambda: self.btn_cancel_video.pack_forget())
+                self.after(0, lambda: self.btn_extract_audio.configure(bg=ACCENT_GREEN, cursor="hand2"))
 
         threading.Thread(target=worker, daemon=True).start()
 
