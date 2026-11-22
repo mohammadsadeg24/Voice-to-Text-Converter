@@ -365,7 +365,7 @@ def save_transcription_report(
     mode_label = (
         f"بازه‌بندی بر اساس بازه‌های {int(interval_seconds)} ثانیه‌ای"
         if is_interval_active and duration > interval_seconds
-        else "متن پیوسته یکپارچه (طول صوت زیر ۳۰ ثانیه)"
+        else f"متن پیوسته یکپارچه (طول صوت زیر {int(interval_seconds)} ثانیه)"
     )
 
     divider = "=" * 80
@@ -746,6 +746,7 @@ class WhisperFlowStudio(tk.Tk):
 
         tk.Label(interval_box, text="طول هر بازه:", font=(FONT_PERSIAN, 8), fg=TEXT_SECONDARY, bg=CARD_BG).pack(side="left", padx=(0, 4))
         self.interval_sec_var = tk.StringVar(value="30")
+        self.interval_sec_var.trace_add("write", lambda *args: self._on_interval_changed())
         self.combo_interval = ttk.Combobox(
             interval_box,
             textvariable=self.interval_sec_var,
@@ -754,6 +755,7 @@ class WhisperFlowStudio(tk.Tk):
             width=4
         )
         self.combo_interval.pack(side="left")
+        self.combo_interval.bind("<<ComboboxSelected>>", self._on_interval_changed)
         tk.Label(interval_box, text="ثانیه", font=(FONT_PERSIAN, 8), fg=TEXT_SECONDARY, bg=CARD_BG).pack(side="left", padx=(4, 0))
 
         # دراپ‌داون انتخاب سخت‌افزار پردازشی (GPU یا CPU)
@@ -793,14 +795,14 @@ class WhisperFlowStudio(tk.Tk):
         self.combo_device.bind("<<ComboboxSelected>>", self._on_device_changed)
 
         # راهنما
-        lbl_hint = tk.Label(
+        self.lbl_interval_hint = tk.Label(
             row_opts,
             text="(ویس‌های زیر ۳۰ ثانیه خودکار یکپارچه می‌شوند)",
             font=(FONT_PERSIAN, 8),
             fg=TEXT_MUTED,
             bg=CARD_BG
         )
-        lbl_hint.pack(side="left", padx=8)
+        self.lbl_interval_hint.pack(side="left", padx=8)
 
         # وضعیت پردازش زنده
         self.lbl_progress_status = tk.Label(
@@ -1055,6 +1057,24 @@ class WhisperFlowStudio(tk.Tk):
         if selected_raw != self.current_model_name:
             self.current_model_name = selected_raw
             self._load_model_into_memory()
+
+    def _on_interval_changed(self, event=None):
+        """بروزرسانی بلادرنگ متن چک‌باکس، تب نمایش و راهنما بر اساس ثانیه انتخابی کاربر"""
+        val = self.interval_sec_var.get().strip() if hasattr(self, "interval_sec_var") else "30"
+        if not val:
+            val = "30"
+
+        # ۱. بروزرسانی عنوان چک‌باکس بازه‌بندی
+        if hasattr(self, "chk_interval"):
+            self.chk_interval.configure(text=f"بازه‌بندی بر اساس بازه زمانی {val} ثانیه‌ای")
+
+        # ۲. بروزرسانی دکمه تب نتایج در فضای کار
+        if hasattr(self, "btn_tab_segmented"):
+            self.btn_tab_segmented.configure(text=f"⏱️ نمای بازه‌بندی {val} ثانیه‌ای")
+
+        # ۳. بروزرسانی برچسب راهنمای زیر بازه
+        if hasattr(self, "lbl_interval_hint"):
+            self.lbl_interval_hint.configure(text=f"(ویس‌های زیر {val} ثانیه خودکار یکپارچه می‌شوند)")
 
     # --------------------------------------------------------------------------
     # انتخاب و پردازش فایل صوتی
