@@ -471,9 +471,10 @@ class WhisperFlowStudio(tk.Tk):
             w = event.width
             if abs(w - self.last_win_width) > 30:
                 self.last_win_width = w
-                # تنظیم خودکار طول سطر متن توضیحات متناسب با عرض پنجره
+                # تنظیم خودکار طول سطر متن توضیحات متناسب با عرض پنجره و تب فعال
                 if hasattr(self, "lbl_desc"):
-                    safe_wrap = max(260, w - 550)
+                    right_offset = 550 if getattr(self, "current_main_tab", "transcribe") == "transcribe" else 360
+                    safe_wrap = max(260, w - right_offset)
                     self.lbl_desc.configure(wraplength=safe_wrap)
 
     def _setup_window_icon(self):
@@ -548,13 +549,13 @@ class WhisperFlowStudio(tk.Tk):
         lbl_desc.pack(anchor="w", pady=(2, 0))
         self.lbl_desc = lbl_desc
 
-        # کنترل‌های وضعیت مدل و سخت‌افزار (سمت راست)
-        top_ctrl = tk.Frame(header, bg=CARD_BG)
-        top_ctrl.pack(side="right", padx=16, pady=10)
+        # کنترل‌های وضعیت مدل و سخت‌افزار (مخصوص تب تبدیل صوت به متن)
+        self.top_ctrl_transcribe = tk.Frame(header, bg=CARD_BG)
+        self.top_ctrl_transcribe.pack(side="right", padx=16, pady=10)
 
         # بج وضعیت لود مدل در RAM
         self.lbl_ram_status = tk.Label(
-            top_ctrl,
+            self.top_ctrl_transcribe,
             text="⏳ در حال لود اولیه مدل در RAM...",
             font=(FONT_PERSIAN, 9, "bold"),
             fg=ACCENT_YELLOW,
@@ -565,7 +566,7 @@ class WhisperFlowStudio(tk.Tk):
         self.lbl_ram_status.pack(side="right", padx=(10, 0))
 
         # دراپ‌داون انتخاب مدل
-        model_frame = tk.Frame(top_ctrl, bg=CARD_BG)
+        model_frame = tk.Frame(self.top_ctrl_transcribe, bg=CARD_BG)
         model_frame.pack(side="right", padx=8)
 
         tk.Label(
@@ -592,6 +593,19 @@ class WhisperFlowStudio(tk.Tk):
         )
         self.model_combo.pack(side="left")
         self.model_combo.bind("<<ComboboxSelected>>", self._on_change_model)
+
+        # کنترل‌های وضعیت مخصوص تب استخراج ویدیو (در آغاز پنهان)
+        self.top_ctrl_video = tk.Frame(header, bg=CARD_BG)
+        lbl_video_badge = tk.Label(
+            self.top_ctrl_video,
+            text="⚡ موتور استخراج: FFmpeg فوق‌سریع (بدون افت کیفیت)",
+            font=(FONT_PERSIAN, 9, "bold"),
+            fg=ACCENT_GREEN,
+            bg=CARD_SURFACE,
+            padx=12,
+            pady=5
+        )
+        lbl_video_badge.pack(side="right")
 
         # ----------------- نوار تب‌های اصلی برنامه (Main Navigation Tabs) -----------------
         nav_container = tk.Frame(self, bg=BG_MAIN)
@@ -1182,16 +1196,40 @@ class WhisperFlowStudio(tk.Tk):
     # بخش تب استخراج صوت از ویدیو (Video to Audio Extractor)
     # --------------------------------------------------------------------------
     def _switch_main_tab(self, tab_id: str):
-        """تغییر تب اصلی برنامه بین تبدیل صوت به متن و استخراج از ویدیو"""
+        """تغییر تب اصلی برنامه بین تبدیل صوت به متن و استخراج از ویدیو و نمایش کنترل‌های اختصاصی هر تب"""
         self.current_main_tab = tab_id
         if tab_id == "transcribe":
             self.btn_nav_transcribe.configure(bg=ACCENT_BLUE, fg=TEXT_PRIMARY, font=(FONT_PERSIAN, 10, "bold"))
             self.btn_nav_video.configure(bg=CARD_SURFACE, fg=TEXT_SECONDARY, font=(FONT_PERSIAN, 10))
+
+            # نمایش کنترل‌های هوش مصنوعی و وضعیت مدل
+            if hasattr(self, "top_ctrl_video"):
+                self.top_ctrl_video.pack_forget()
+            if hasattr(self, "top_ctrl_transcribe"):
+                self.top_ctrl_transcribe.pack(side="right", padx=16, pady=10)
+
+            if hasattr(self, "lbl_desc"):
+                self.lbl_desc.configure(text="سامانه تخصصی تبدیل صوت به متن با بازه‌بندی زمانی ۳۰ ثانیه‌ای | فارسی و انگلیسی")
+                safe_wrap = max(260, self.winfo_width() - 550)
+                self.lbl_desc.configure(wraplength=safe_wrap)
+
             self.page_video.pack_forget()
             self.page_transcribe.pack(fill="both", expand=True)
         else:
             self.btn_nav_video.configure(bg=ACCENT_BLUE, fg=TEXT_PRIMARY, font=(FONT_PERSIAN, 10, "bold"))
             self.btn_nav_transcribe.configure(bg=CARD_SURFACE, fg=TEXT_SECONDARY, font=(FONT_PERSIAN, 10))
+
+            # پنهان‌سازی کنترل‌های هوش مصنوعی و نمایش وضعیت موتور استخراج ویدیو
+            if hasattr(self, "top_ctrl_transcribe"):
+                self.top_ctrl_transcribe.pack_forget()
+            if hasattr(self, "top_ctrl_video"):
+                self.top_ctrl_video.pack(side="right", padx=16, pady=10)
+
+            if hasattr(self, "lbl_desc"):
+                self.lbl_desc.configure(text="استخراج فوق‌سریع صوت از انواع ویدیو و کلیپ بدون افت کیفیت با موتور FFmpeg")
+                safe_wrap = max(260, self.winfo_width() - 360)
+                self.lbl_desc.configure(wraplength=safe_wrap)
+
             self.page_transcribe.pack_forget()
             self.page_video.pack(fill="both", expand=True)
             self._refresh_recent_extractions()
