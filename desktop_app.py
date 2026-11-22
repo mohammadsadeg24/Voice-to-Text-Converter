@@ -245,6 +245,14 @@ def format_timestamp(seconds: float) -> str:
     return f"{mins:02d}:{secs:02d}"
 
 
+def format_display_name(name: str, max_chars: int = 42) -> str:
+    """کوتاه‌سازی هوشمند نام فایل‌های طولانی برای جلوگیری از به‌هم‌ریختگی المان‌های UI"""
+    if len(name) <= max_chars:
+        return name
+    half = (max_chars - 3) // 2
+    return f"{name[:half]}...{name[-half:]}"
+
+
 def segment_transcription_text(
     segments: list,
     total_duration: float,
@@ -391,8 +399,6 @@ class WhisperFlowStudio(tk.Tk):
         super().__init__()
 
         self.title("WhisperFlow Studio Pro — تبدیل و بازه‌بندی صوت به متن")
-        self.geometry("1020x760")
-        self.minsize(860, 600)
         self.configure(bg=BG_MAIN)
 
         # ست کردن آیکون برنامه
@@ -400,6 +406,9 @@ class WhisperFlowStudio(tk.Tk):
 
         # فعال‌سازی Dark Titlebar بومی ویندوز ۱۰ و ۱۱
         self._apply_windows_dark_titlebar()
+
+        # تنظیم هوشمند ابعاد و واکنش‌گرایی پنجره (Responsive Window)
+        self._setup_responsive_window()
 
         # وضعیت‌های برنامه
         self.current_model_name = "large-v3"  # بالاترین دقت ممکن — فقط یک‌بار دانلود
@@ -423,6 +432,49 @@ class WhisperFlowStudio(tk.Tk):
 
         # لود مدل در رم به صورت خودکار در آغاز برنامه
         self.after(300, self._load_model_into_memory)
+
+    def _setup_responsive_window(self):
+        """
+        تنظیم ابعاد کاملاً واکنش‌گرا و پویا متناسب با ابعاد مانیتور کاربر (Responsive Design):
+        ۱. شناسایی ابعاد و رزولوشن صفحه نمایش
+        ۲. محاسبه اندازه متناسب برای حالت پنجره‌ای (Restore Down)
+        ۳. مرکزچین کردن پنجره در وسط مانیتور
+        ۴. اجرای خودکار در حالت ماکزیمایز (Maximized/Zoomed) در ویندوز جهت استفاده بهینه از تمام صفحه
+        ۵. مانیتورینگ تغییر سایز برای تطبیق خودکار عرض متون و المان‌ها
+        """
+        self.update_idletasks()
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+
+        # ابعاد منعطف برای حالت پنجره‌ای عادی (Restore Down)
+        target_w = max(960, min(1420, int(screen_w * 0.86)))
+        target_h = max(640, min(860, int(screen_h * 0.86)))
+        pos_x = max(0, (screen_w - target_w) // 2)
+        pos_y = max(0, (screen_h - target_h) // 2 - 25)
+
+        self.geometry(f"{target_w}x{target_h}+{pos_x}+{pos_y}")
+        self.minsize(860, 540)
+
+        # اجرای پنجره در حالت ماکزیمایز در ویندوز
+        if sys.platform == "win32":
+            try:
+                self.state("zoomed")
+            except Exception:
+                pass
+
+        # لیسنر واکنش‌گرای تغییر سایز پنجره
+        self.last_win_width = 0
+        self.bind("<Configure>", self._on_window_resize)
+
+    def _on_window_resize(self, event):
+        if event.widget == self:
+            w = event.width
+            if abs(w - self.last_win_width) > 30:
+                self.last_win_width = w
+                # تنظیم خودکار طول سطر متن توضیحات متناسب با عرض پنجره
+                if hasattr(self, "lbl_desc"):
+                    safe_wrap = max(260, w - 550)
+                    self.lbl_desc.configure(wraplength=safe_wrap)
 
     def _setup_window_icon(self):
         ico_file = ASSETS_DIR / "app_icon.ico"
@@ -490,9 +542,11 @@ class WhisperFlowStudio(tk.Tk):
             text="سامانه تخصصی تبدیل صوت به متن با بازه‌بندی زمانی ۳۰ ثانیه‌ای | فارسی و انگلیسی",
             font=(FONT_PERSIAN, 9),
             fg=TEXT_SECONDARY,
-            bg=CARD_BG
+            bg=CARD_BG,
+            justify="left"
         )
         lbl_desc.pack(anchor="w", pady=(2, 0))
+        self.lbl_desc = lbl_desc
 
         # کنترل‌های وضعیت مدل و سخت‌افزار (سمت راست)
         top_ctrl = tk.Frame(header, bg=CARD_BG)
@@ -534,7 +588,7 @@ class WhisperFlowStudio(tk.Tk):
                 "tiny (فوق‌العاده سبک)"
             ],
             state="readonly",
-            width=32
+            width=26
         )
         self.model_combo.pack(side="left")
         self.model_combo.bind("<<ComboboxSelected>>", self._on_change_model)
@@ -661,12 +715,12 @@ class WhisperFlowStudio(tk.Tk):
         # راهنما
         lbl_hint = tk.Label(
             row_opts,
-            text="(نکته: فایل‌ها و ویس‌های کمتر از ۳۰ ثانیه خودکار به عنوان یک متن خروجی داده می‌شوند)",
+            text="(فایل‌ها و ویس‌های زیر ۳۰ ثانیه خودکار یکپارچه می‌شوند)",
             font=(FONT_PERSIAN, 8),
             fg=TEXT_MUTED,
             bg=CARD_BG
         )
-        lbl_hint.pack(side="left", padx=10)
+        lbl_hint.pack(side="left", padx=8)
 
         # وضعیت پردازش زنده
         self.lbl_progress_status = tk.Label(
@@ -922,9 +976,10 @@ class WhisperFlowStudio(tk.Tk):
         if chosen:
             self.selected_file_path = chosen
             name = Path(chosen).name
+            disp_name = format_display_name(name, 45)
             size_mb = os.path.getsize(chosen) / (1024 * 1024)
             self.lbl_file_display.configure(
-                text=f"✓ انتخاب شد: {name} ({size_mb:.1f} MB)",
+                text=f"✓ انتخاب شد: {disp_name} ({size_mb:.1f} MB)",
                 fg=ACCENT_GREEN
             )
 
@@ -1207,16 +1262,16 @@ class WhisperFlowStudio(tk.Tk):
 
         tk.Label(row_opts, text="فرمت صوت استخراجی:", font=(FONT_PERSIAN, 9), fg=TEXT_SECONDARY, bg=CARD_BG).pack(side="left", padx=(0, 6))
 
-        self.video_fmt_var = tk.StringVar(value="MP3 (کیفیت عالی 192kbps - حجم سبک)")
+        self.video_fmt_var = tk.StringVar(value="MP3 (کیفیت 192k - سبک)")
         self.combo_video_fmt = ttk.Combobox(
             row_opts,
             textvariable=self.video_fmt_var,
             values=[
-                "MP3 (کیفیت عالی 192kbps - حجم سبک)",
-                "WAV (استودیویی 16kHz - بدون فشرده‌سازی و بهینه ویسپر)"
+                "MP3 (کیفیت 192k - سبک)",
+                "WAV (16kHz - نیتیو ویسپر)"
             ],
             state="readonly",
-            width=36
+            width=26
         )
         self.combo_video_fmt.pack(side="left", padx=(0, 16))
 
@@ -1314,8 +1369,32 @@ class WhisperFlowStudio(tk.Tk):
         btn_open_dir = self._create_small_btn(hist_header, "📁 پوشه خروجی", self._open_extractions_folder)
         btn_open_dir.pack(side="right", padx=3)
 
-        self.frame_recent_list = tk.Frame(panel_history, bg="#111822", highlightbackground=BORDER_COLOR, highlightthickness=1)
-        self.frame_recent_list.pack(fill="both", expand=True, padx=16, pady=(4, 14))
+        # کانتینر اسکرول‌پذیر و ریسپانسیو تاریخچه
+        list_container = tk.Frame(panel_history, bg="#111822", highlightbackground=BORDER_COLOR, highlightthickness=1)
+        list_container.pack(fill="both", expand=True, padx=16, pady=(4, 14))
+
+        self.canvas_recent = tk.Canvas(list_container, bg="#111822", highlightthickness=0)
+        recent_scroll = tk.Scrollbar(list_container, orient="vertical", command=self.canvas_recent.yview)
+
+        self.frame_recent_list = tk.Frame(self.canvas_recent, bg="#111822")
+        self.frame_recent_list.bind(
+            "<Configure>",
+            lambda e: self.canvas_recent.configure(scrollregion=self.canvas_recent.bbox("all"))
+        )
+        self.canvas_recent_window = self.canvas_recent.create_window((0, 0), window=self.frame_recent_list, anchor="nw")
+        self.canvas_recent.bind(
+            "<Configure>",
+            lambda e: self.canvas_recent.itemconfig(self.canvas_recent_window, width=e.width)
+        )
+        self.canvas_recent.configure(yscrollcommand=recent_scroll.set)
+
+        self.canvas_recent.pack(side="left", fill="both", expand=True)
+        recent_scroll.pack(side="right", fill="y")
+
+        self.canvas_recent.bind_all(
+            "<MouseWheel>",
+            lambda e: self.canvas_recent.yview_scroll(int(-1 * (e.delta / 120)), "units") if getattr(self, "current_main_tab", "") == "video" else None
+        )
 
         self._refresh_recent_extractions()
 
@@ -1333,9 +1412,10 @@ class WhisperFlowStudio(tk.Tk):
         if chosen:
             self.selected_video_path = chosen
             name = Path(chosen).name
+            disp_name = format_display_name(name, 45)
             size_mb = os.path.getsize(chosen) / (1024 * 1024)
             self.lbl_video_display.configure(
-                text=f"✓ انتخاب شد: {name} ({size_mb:.1f} MB)",
+                text=f"✓ انتخاب شد: {disp_name} ({size_mb:.1f} MB)",
                 fg=ACCENT_GREEN
             )
 
@@ -1400,9 +1480,10 @@ class WhisperFlowStudio(tk.Tk):
 
         self.selected_file_path = filepath
         name = Path(filepath).name
+        disp_name = format_display_name(name, 45)
         size_mb = os.path.getsize(filepath) / (1024 * 1024)
         self.lbl_file_display.configure(
-            text=f"✓ انتخاب شد از ویدیو: {name} ({size_mb:.1f} MB)",
+            text=f"✓ انتخاب شد از ویدیو: {disp_name} ({size_mb:.1f} MB)",
             fg=ACCENT_GREEN
         )
         self._switch_main_tab("transcribe")
@@ -1455,13 +1536,14 @@ class WhisperFlowStudio(tk.Tk):
             lbl_empty.pack(pady=35)
             return
 
-        for p in files[:7]:
+        for p in files[:30]:
             row = tk.Frame(self.frame_recent_list, bg=CARD_SURFACE, highlightbackground=BORDER_COLOR, highlightthickness=1)
             row.pack(fill="x", pady=3, padx=10)
 
             size_mb = p.stat().st_size / (1024 * 1024)
             mtime = datetime.datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-            info_text = f"🎵  {p.name}   |   {size_mb:.2f} MB   |   {mtime}"
+            disp_name = format_display_name(p.name, 42)
+            info_text = f"🎵  {disp_name}   |   {size_mb:.2f} MB   |   {mtime}"
 
             lbl_info = tk.Label(row, text=info_text, font=(FONT_FAMILY, 9), fg=TEXT_PRIMARY, bg=CARD_SURFACE, anchor="w")
             lbl_info.pack(side="left", padx=10, fill="x", expand=True)
