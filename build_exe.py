@@ -65,9 +65,23 @@ def build_app():
     target_models_dir = target_app_dir / "models"
     target_models_dir.mkdir(parents=True, exist_ok=True)
 
-    if (MODELS_DIR / "small.pt").exists():
-        print(">>> Copying models/small.pt into distribution package...")
-        shutil.copyfile(MODELS_DIR / "small.pt", target_models_dir / "small.pt")
+    # Copy any available .pt models from models/ or cache
+    found_model = False
+    for pt in MODELS_DIR.glob("*.pt"):
+        print(f">>> Copying {pt.name} into distribution package...")
+        shutil.copy2(pt, target_models_dir / pt.name)
+        print(f"[OK] Offline model '{pt.name}' bundled successfully!")
+        found_model = True
+
+    cache_large = Path.home() / ".cache" / "whisper" / "large-v3.pt"
+    if cache_large.exists() and not (target_models_dir / "large-v3.pt").exists():
+        print(">>> Copying large-v3.pt from cache into distribution package...")
+        shutil.copy2(cache_large, target_models_dir / "large-v3.pt")
+        print("[OK] Offline model 'large-v3.pt' bundled successfully from cache!")
+        found_model = True
+
+    if not found_model and (MODELS_DIR / "small.pt").exists():
+        shutil.copy2(MODELS_DIR / "small.pt", target_models_dir / "small.pt")
         print("[OK] Offline model 'small.pt' bundled successfully!")
 
     # Copy local ffmpeg.exe if present

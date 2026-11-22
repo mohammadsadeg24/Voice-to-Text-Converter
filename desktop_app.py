@@ -348,7 +348,7 @@ class WhisperFlowStudio(tk.Tk):
         self._apply_windows_dark_titlebar()
 
         # وضعیت‌های برنامه
-        self.current_model_name = "small"  # بهترین مدل برای فارسی و انگلیسی
+        self.current_model_name = "large-v3"  # بالاترین دقت ممکن — فقط یک‌بار دانلود
         self.whisper_model = None
         self.is_loading_model = False
         self.is_transcribing = False
@@ -416,7 +416,7 @@ class WhisperFlowStudio(tk.Tk):
 
         lbl_ver = tk.Label(
             title_row,
-            text=" v2.5 Enterprise ",
+            text=" v3.0 Enterprise ",
             font=(FONT_FAMILY, 8, "bold"),
             fg=ACCENT_BLUE_HOVER,
             bg=CARD_SURFACE,
@@ -462,17 +462,19 @@ class WhisperFlowStudio(tk.Tk):
             bg=CARD_BG
         ).pack(side="left", padx=(0, 4))
 
-        self.model_var = tk.StringVar(value="small (پیشنهادی - بالاترین دقت فارسی)")
+        self.model_var = tk.StringVar(value="large-v3 (بالاترین دقت — پیشنهادی)")
         self.model_combo = ttk.Combobox(
             model_frame,
             textvariable=self.model_var,
             values=[
-                "small (پیشنهادی - بالاترین دقت فارسی)",
+                "large-v3 (بالاترین دقت — پیشنهادی)",
+                "medium (دقت بالا — سبک‌تر)",
+                "small (متوسط — سریع)",
                 "base (سریع و سبک)",
                 "tiny (فوق‌العاده سبک)"
             ],
             state="readonly",
-            width=28
+            width=32
         )
         self.model_combo.pack(side="left")
         self.model_combo.bind("<<ComboboxSelected>>", self._on_change_model)
@@ -704,13 +706,14 @@ class WhisperFlowStudio(tk.Tk):
     def _render_welcome_message(self):
         self.text_editor.delete("1.0", "end")
         msg = (
-            "به نرم‌افزار WhisperFlow Studio Pro خوش آمدید!\n\n"
-            "ویژگی‌های کلیدی و فرآیند کار:\n"
-            "۱. نگهداری مدل در حافظه RAM: مدل هوش مصنوعی فقط یک‌بار لود می‌شود و در حافظه فعال می‌ماند.\n"
-            "   (از این رو می‌توانید بی‌شمار فایل را بدون فوت وقت و بدون مصرف اینترنت تبدیل کنید).\n"
-            "۲. بازه‌بندی هوشمند ۳۰ ثانیه‌ای: فایل‌های طولانی به بازه‌های [00:00 - 00:30] و ... تفکیک می‌شوند.\n"
-            "۳. فایل‌های صوتی کمتر از ۳۰ ثانیه به صورت خودکار به شکل یک متن یکپارچه نمایش داده می‌شوند.\n"
-            "۴. خروجی در قالب فایل متنی استاندارد UTF-8 ذخیره شده و با یک کلیک در Notepad باز می‌شود.\n\n"
+            "به نرم‌افزار WhisperFlow Studio Pro v3.0 خوش آمدید!\n\n"
+            "ویژگی‌های کلیدی نسخه ۳.۰:\n"
+            "۱. مدل هوش مصنوعی: OpenAI Whisper Large-v3 (بالاترین دقت ممکن — ۱.۵ گیگابایت)\n"
+            "   فقط یک‌بار دانلود می‌شود و در اجراهای بعدی کاملاً آفلاین کار می‌کند.\n"
+            "۲. شناسایی خودکار کارت گرافیک NVIDIA: اگر GPU دارید، پردازش تا ۱۰ برابر سریع‌تر خواهد بود.\n"
+            "۳. بازه‌بندی هوشمند ۳۰ ثانیه‌ای: فایل‌های طولانی (حتی تا ۱ ساعت) به بازه‌های [00:00 - 00:30] تفکیک می‌شوند.\n"
+            "۴. فایل‌های صوتی کمتر از ۳۰ ثانیه به صورت خودکار به شکل یک متن یکپارچه نمایش داده می‌شوند.\n"
+            "۵. خروجی در قالب فایل متنی استاندارد UTF-8 ذخیره شده و با یک کلیک در Notepad باز می‌شود.\n\n"
             "برای شروع، روی دکمه «📁 انتخاب فایل صوتی» کلیک کنید."
         )
         self.text_editor.insert("1.0", msg, "rtl")
@@ -718,14 +721,29 @@ class WhisperFlowStudio(tk.Tk):
     # --------------------------------------------------------------------------
     # مدیریت مدل در حافظه RAM (یک‌بار لود، مصرف اینترنت: صفر)
     # --------------------------------------------------------------------------
+    def _detect_best_device(self):
+        """شناسایی خودکار بهترین سخت‌افزار پردازشی (CUDA GPU > CPU)"""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                gpu_name = torch.cuda.get_device_name(0)
+                vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                return "cuda", f"{gpu_name} ({vram_gb:.1f} GB)"
+        except Exception:
+            pass
+        return "cpu", "CPU"
+
     def _load_model_into_memory(self):
         """لود مدل هوش مصنوعی در رم و بررسی پوشه محلی models/"""
         def worker():
             self.is_loading_model = True
             model_target = self.current_model_name
 
+            # شناسایی بهترین سخت‌افزار
+            device, hw_label = self._detect_best_device()
+
             self.after(0, lambda: self.lbl_ram_status.configure(
-                text=f"⏳ در حال بارگذاری مدل {model_target.upper()} در RAM...",
+                text=f"⏳ بارگذاری مدل {model_target.upper()} روی {hw_label}...",
                 fg=ACCENT_YELLOW
             ))
 
@@ -739,18 +757,37 @@ class WhisperFlowStudio(tk.Tk):
                 else:
                     model_path_or_name = model_target
 
-                # لود پایدار روی پردازنده سیستم
-                model = whisper.load_model(model_path_or_name, device="cpu")
+                # لود مدل روی بهترین سخت‌افزار موجود
+                model = whisper.load_model(model_path_or_name, device=device)
                 self.whisper_model = model
+                self._active_device = device
 
+                speed_label = "⚡ GPU — سرعت بالا" if device == "cuda" else "🖥️ CPU"
                 self.after(0, lambda: self.lbl_ram_status.configure(
-                    text=f"🟢 مدل {model_target.upper()} آماده در رم (آفلاین)",
+                    text=f"🟢 مدل {model_target.upper()} آماده ({speed_label})",
                     fg=ACCENT_GREEN
                 ))
 
             except Exception as e:
+                # اگر روی GPU خطا داد، فال‌بک به CPU
+                if device == "cuda":
+                    try:
+                        import whisper as w2
+                        local_model_file = MODELS_DIR / f"{model_target}.pt"
+                        path_or_name = str(local_model_file) if local_model_file.exists() else model_target
+                        model = w2.load_model(path_or_name, device="cpu")
+                        self.whisper_model = model
+                        self._active_device = "cpu"
+                        self.after(0, lambda: self.lbl_ram_status.configure(
+                            text=f"🟢 مدل {model_target.upper()} آماده (🖥️ CPU — فال‌بک)",
+                            fg=ACCENT_GREEN
+                        ))
+                        return
+                    except Exception:
+                        pass
+
                 self.after(0, lambda: self.lbl_ram_status.configure(
-                    text=f"❌ خطا در بارگذاری: {str(e)[:30]}",
+                    text=f"❌ خطا در بارگذاری: {str(e)[:40]}",
                     fg=ACCENT_RED
                 ))
             finally:
@@ -817,17 +854,38 @@ class WhisperFlowStudio(tk.Tk):
                     text=f"⏳ در حال پردازش کلمات با مدل {self.current_model_name.upper()} ({duration:.1f}s)..."
                 ))
 
-                # ۲. استخراج کلمات و تایم‌استمپ‌ها با الگوریتم Beam Search
-                # - جلوگیری از لوپ تکرار کلمات
-                # - فال‌بک داینامیک دما
+                # ۲. استخراج کلمات و تایم‌استمپ‌ها
+                # - حالت GPU: استفاده از هسته‌های CUDA با fp16=False برای جلوگیری کامل از خطای NaN روی کارت‌های سری ۱۶ و تورینگ
+                # - بالاترین دقت با Beam Search و مقایسه چندگانه
+                use_cuda = getattr(self, '_active_device', 'cpu') == 'cuda'
+                if use_cuda:
+                    try:
+                        import torch
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                    transcribe_params = dict(
+                        beam_size=5,
+                        best_of=5,
+                        temperature=0.0,
+                        fp16=False
+                    )
+                else:
+                    transcribe_params = dict(
+                        beam_size=1,
+                        best_of=1,
+                        temperature=0.0,
+                        fp16=False
+                    )
+
                 result = self.whisper_model.transcribe(
                     audio_arr,
-                    beam_size=5,
-                    temperature=(0.0, 0.2, 0.4),
-                    compression_ratio_threshold=2.2,
-                    condition_on_previous_text=False,
-                    initial_prompt="این یک فایل صوتی گفتاری به زبان فارسی و انگلیسی است.",
-                    fp16=False
+                    compression_ratio_threshold=2.4,
+                    logprob_threshold=-1.0,
+                    no_speech_threshold=0.6,
+                    condition_on_previous_text=True,
+                    initial_prompt="این یک فایل صوتی گفتاری به زبان فارسی و انگلیسی است. لطفاً تمام کلمات را با دقت بالا رونویسی کنید.",
+                    **transcribe_params
                 )
 
                 elapsed = time.time() - start_t
@@ -872,7 +930,8 @@ class WhisperFlowStudio(tk.Tk):
                 ))
 
             except Exception as e:
-                self.after(0, lambda: self._on_transcription_error(str(e)))
+                err_str = str(e) if str(e) else repr(e)
+                self.after(0, lambda msg=err_str: self._on_transcription_error(msg))
             finally:
                 self.is_transcribing = False
 
