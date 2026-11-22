@@ -73,11 +73,11 @@ def build_app():
         print(f"[OK] Offline model '{pt.name}' bundled successfully!")
         found_model = True
 
-    cache_large = Path.home() / ".cache" / "whisper" / "large-v3.pt"
-    if cache_large.exists() and not (target_models_dir / "large-v3.pt").exists():
-        print(">>> Copying large-v3.pt from cache into distribution package...")
-        shutil.copy2(cache_large, target_models_dir / "large-v3.pt")
-        print("[OK] Offline model 'large-v3.pt' bundled successfully from cache!")
+    cache_small = Path.home() / ".cache" / "whisper" / "small.pt"
+    if cache_small.exists() and not (target_models_dir / "small.pt").exists():
+        print(">>> Copying small.pt from cache into distribution package...")
+        shutil.copy2(cache_small, target_models_dir / "small.pt")
+        print("[OK] Offline model 'small.pt' bundled successfully from cache!")
         found_model = True
 
     if not found_model and (MODELS_DIR / "small.pt").exists():
